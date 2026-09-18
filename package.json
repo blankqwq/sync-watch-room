@@ -15,6 +15,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "start": "node server/index.js",
+    "setup:env": "sh scripts/setup-env.sh",
     "test": "node --test server/*.test.js",
     "check": "npm test && npm run build"
   },

@@ -127,8 +127,8 @@ Direct peer connections do not send voice through the room server. When direct c
 The repository includes separate production services for the Vue frontend, Node.js signaling backend, and coturn relay, plus an Nginx WebSocket reverse proxy, health checks, graceful shutdown, and a Docker Compose definition.
 
 ```bash
-cp .env.example .env
-# Set ALLOWED_ORIGINS, TURN URLs, and a fresh TURN shared secret before exposing the service.
+npm run setup:env
+# Review the generated domain, public IP, and TURN settings before exposing the service.
 docker compose up --build -d
 ```
 

@@ -24,13 +24,23 @@ The frontend, backend, and coturn relay run as separate services. Nginx serves t
 
 ## Docker Compose
 
-1. Create the deployment environment file:
+1. Generate the deployment environment file interactively:
 
    ```bash
-   cp .env.example .env
+   npm run setup:env
    ```
 
-2. Generate a secret and set the public TURN URLs:
+   For unattended deployment:
+
+   ```bash
+   scripts/setup-env.sh \
+     --domain watch.example.com \
+     --turn-domain turn.example.com \
+     --public-ip 203.0.113.10 \
+     --force
+   ```
+
+2. The script generates the shared secret and public TURN URLs. To generate a replacement secret manually:
 
    ```bash
    openssl rand -hex 32

@@ -127,8 +127,8 @@ P2P 直连时语音不会经过房间服务器。直连失败时，后端会为�
 仓库内已经提供 Vue 前端、Node.js 信令后端和 coturn 中继服务，以及 Nginx WebSocket 反向代理、健康检查、优雅退出和 Docker Compose 编排。
 
 ```bash
-cp .env.example .env
-# 对外开放前，请设置 ALLOWED_ORIGINS、TURN 地址和新的 TURN 共享密钥。
+npm run setup:env
+# 对外开放前，请检查生成的域名、公网 IP 和 TURN 配置。
 docker compose up --build -d
 ```
 

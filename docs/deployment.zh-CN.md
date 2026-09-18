@@ -24,13 +24,23 @@ Nginx 前端 :8080 ── /ws ──▶ Node.js 后端 :4174
 
 ## Docker Compose
 
-1. 创建部署环境文件：
+1. 交互式生成部署环境文件：
 
    ```bash
-   cp .env.example .env
+   npm run setup:env
    ```
 
-2. 生成共享密钥并设置公网 TURN 地址：
+   无人值守部署可以直接传参：
+
+   ```bash
+   scripts/setup-env.sh \
+     --domain watch.example.com \
+     --turn-domain turn.example.com \
+     --public-ip 203.0.113.10 \
+     --force
+   ```
+
+2. 脚本会自动生成共享密钥和公网 TURN 地址。如需手动更换密钥：
 
    ```bash
    openssl rand -hex 32

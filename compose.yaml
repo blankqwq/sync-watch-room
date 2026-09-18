@@ -57,5 +57,5 @@ services:
       turn:
         condition: service_started
     ports:
-      - "${APP_PORT:-8088}:8080"
+      - "${APP_BIND:-0.0.0.0}:${APP_PORT:-8088}:8080"
     restart: unless-stopped
