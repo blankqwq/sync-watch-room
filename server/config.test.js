@@ -9,6 +9,8 @@ test("loadConfig returns production-safe server defaults", () => {
   assert.equal(config.wsPath, "/ws");
   assert.equal(config.serveStatic, true);
   assert.equal(config.maxPayloadBytes, 65536);
+  assert.deepEqual(config.stunUrls, ["stun:stun.l.google.com:19302"]);
+  assert.deepEqual(config.turnUrls, []);
 });
 
 test("loadConfig parses deployment settings", () => {
@@ -16,10 +18,14 @@ test("loadConfig parses deployment settings", () => {
     PORT: "8080",
     SERVE_STATIC: "false",
     ALLOWED_ORIGINS: "https://watch.example.com, https://admin.example.com",
+    STUN_URLS: "stun:turn.example.com:3478",
+    TURN_URLS: "turn:turn.example.com:3478?transport=udp, turn:turn.example.com:3478?transport=tcp",
+    TURN_SHARED_SECRET: "test-secret",
   });
   assert.equal(config.port, 8080);
   assert.equal(config.serveStatic, false);
   assert.deepEqual(config.allowedOrigins, ["https://watch.example.com", "https://admin.example.com"]);
+  assert.equal(config.turnUrls.length, 2);
 });
 
 test("loadConfig rejects invalid values", () => {

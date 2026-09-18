@@ -1,14 +1,20 @@
 import { createServer } from "node:http";
 import { createHttpHandler } from "./http.js";
+import { createIceServerProvider } from "./ice.js";
 import { createLogger } from "./logger.js";
 import { attachRealtimeServer } from "./realtime.js";
 
 export function createApplication(config, logger = createLogger(config.nodeEnv)) {
   let ready = false;
   let realtime = null;
-  const getServiceStatus = () => ({ ready, ...(realtime?.getStats() || { rooms: 0, clients: 0 }) });
+  const getServiceStatus = () => ({
+    ready,
+    turnConfigured: config.turnUrls.length > 0,
+    ...(realtime?.getStats() || { rooms: 0, clients: 0 }),
+  });
   const server = createServer(createHttpHandler(config, getServiceStatus));
-  realtime = attachRealtimeServer(server, config, logger);
+  const createIceServers = createIceServerProvider(config);
+  realtime = attachRealtimeServer(server, config, logger, createIceServers);
 
   server.on("clientError", (error, socket) => {
     logger.warn("Invalid HTTP client request", { error: error.message });
@@ -29,6 +35,7 @@ export function createApplication(config, logger = createLogger(config.nodeEnv))
       host: config.host,
       port: typeof address === "object" ? address.port : config.port,
       staticFiles: config.serveStatic,
+      turnConfigured: config.turnUrls.length > 0,
       wsPath: config.wsPath,
     });
     return address;

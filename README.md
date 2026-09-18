@@ -20,6 +20,7 @@ A lightweight synchronized watch room built with Vue 3, Node.js, WebSocket, and 
 - Per-member buffer progress, latency, packet loss, voice state, and connection health
 - Real-time chat, typing indicators, room events, and member presence
 - WebRTC voice chat with mute, RNNoise suppression, and microphone volume control
+- Short-lived TURN credentials with automatic relay fallback when direct WebRTC connectivity fails
 - WebSocket heartbeat detection, reconnectable room state, and automatic host failover
 - MP4 and WebM playback through the browser, plus HLS/M3U8 playback through `hls.js`
 - Responsive desktop and mobile interfaces with fullscreen playback controls
@@ -119,15 +120,15 @@ Voice uses WebRTC audio tracks. The microphone settings include:
 - Microphone volume from `0%` (silent) to `250%` (amplified)
 - Microphone mute and per-member voice state
 
-Direct peer connections do not send voice through the room server. Production deployments should provide a separately capacity-planned TURN service for networks where direct WebRTC connectivity fails.
+Direct peer connections do not send voice through the room server. When direct connectivity fails, the backend issues short-lived credentials for the included coturn service and WebRTC automatically tries TURN relay. Member network status shows `P2P` or `TURN` for the selected path. TURN traffic consumes server bandwidth and must be capacity-planned.
 
 ## Production Deployment
 
-The repository includes separate production images for the Vue frontend and Node.js signaling service, an Nginx WebSocket reverse proxy, health checks, graceful shutdown, and a Docker Compose definition.
+The repository includes separate production services for the Vue frontend, Node.js signaling backend, and coturn relay, plus an Nginx WebSocket reverse proxy, health checks, graceful shutdown, and a Docker Compose definition.
 
 ```bash
 cp .env.example .env
-# Set ALLOWED_ORIGINS and production ICE/TURN servers before exposing the service.
+# Set ALLOWED_ORIGINS, TURN URLs, and a fresh TURN shared secret before exposing the service.
 docker compose up --build -d
 ```
 
@@ -141,7 +142,7 @@ For an internet-facing service, the next application-level controls should inclu
 
 - Persistent room and message storage
 - Authentication and room authorization
-- A TURN service with bandwidth limits
+- TURN capacity limits and usage monitoring
 - Per-user request throttling and stronger authorization-aware validation
 - Shared room state and room-aware multi-instance routing
 - Observability for WebSocket, WebRTC, media, and host-failover events

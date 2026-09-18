@@ -15,11 +15,12 @@ Nginx 前端 :8080 ── /ws ──▶ Node.js 后端 :4174
   │
   └── Vue 静态资源
 
-浏览器 ── HTTPS 视频请求 ──▶ OSS / CDN
-浏览器 ◀──── WebRTC 语音 ───▶ 浏览器
+浏览器 ── STUN / TURN ─────▶ coturn :3478
+浏览器 ── HTTPS 视频请求 ─▶ OSS / CDN
+浏览器 ◀──── WebRTC 语音 ─▶ 浏览器
 ```
 
-前端与后端使用独立容器。Nginx 托管构建后的 Vue 应用，并将 `/ws` 转发到 Node.js 服务。视频继续存放在 OSS/CDN，不经过前后端应用容器。
+前端、后端与 coturn 中继分别运行。Nginx 托管构建后的 Vue 应用，并将 `/ws` 转发到 Node.js；后端签发临时 TURN REST 凭证，coturn 负责 STUN 和中继流量。视频继续存放在 OSS/CDN，不经过应用容器。
 
 ## Docker Compose
 
@@ -29,7 +30,13 @@ Nginx 前端 :8080 ── /ws ──▶ Node.js 后端 :4174
    cp .env.example .env
    ```
 
-2. 至少将 `ALLOWED_ORIGINS` 设置为公网 HTTPS 域名。如果语音需要穿透受限网络，请通过 `VITE_ICE_SERVERS` 配置生产 STUN/TURN 凭证。
+2. 生成共享密钥并设置公网 TURN 地址：
+
+   ```bash
+   openssl rand -hex 32
+   ```
+
+   将结果写入 `TURN_SHARED_SECRET`，并按公网域名设置 `ALLOWED_ORIGINS`、`STUN_URLS`、`TURN_URLS` 与 `TURN_REALM`。Node.js 后端和 coturn 必须使用相同密钥。
 
 3. 构建并启动服务：
 
@@ -62,9 +69,9 @@ TLS 应部署在平台入口、负载均衡、Caddy、Traefik 或其他边缘代
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
 | `VITE_WS_URL` | 空 | 信令服务使用独立域名时填写完整 WebSocket 地址；留空使用同域 `/ws` |
-| `VITE_ICE_SERVERS` | 默认 Google STUN | 传给 `RTCPeerConnection` 的 JSON 数组；生产语音建议加入带认证的 TURN |
+| `VITE_ICE_SERVERS` | 默认 Google STUN | 可选的构建期兜底，仅在后端未下发 ICE 服务时使用 |
 
-Vite 变量会在镜像构建时写入前端资源，修改后必须重新构建前端镜像。不要提交长期有效的 TURN 凭证，建议由可信服务签发短期凭证。
+Vite 变量会在镜像构建时写入前端资源。正常部署由后端动态下发短期 ICE 凭证，因此 TURN 密钥不会进入前端产物。
 
 ### 后端运行变量
 
@@ -79,8 +86,20 @@ Vite 变量会在镜像构建时写入前端资源，修改后必须重新构建
 | `WS_MAX_PAYLOAD_BYTES` | `65536` | 单条 WebSocket 消息大小上限 |
 | `SHUTDOWN_TIMEOUT_MS` | `10000` | 优雅退出最长等待时间 |
 | `DIST_DIR` | 项目 `dist/` | 前后端合并部署时的静态目录 |
+| `STUN_URLS` | Google STUN | 返回给客户端的 STUN 地址，多个地址使用逗号分隔 |
+| `TURN_URLS` | 空 | 返回给客户端的 TURN 地址，多个地址使用逗号分隔 |
+| `TURN_SHARED_SECRET` | 空 | 仅由 Node.js 与 coturn 共享，用于签发临时凭证 |
+| `TURN_CREDENTIAL_TTL_SECONDS` | `3600` | TURN 临时凭证有效期 |
 
 生产环境应配置 `ALLOWED_ORIGINS`，例如 `https://watch.example.com`。Origin 校验不等于身份认证，私有房间仍需单独实现权限控制。
+
+## TURN 网络要求
+
+Compose 默认暴露 TCP/UDP `3478` 和 UDP `49160-49200`，云安全组与主机防火墙都要放行同样的端口。`STUN_URLS` 与 `TURN_URLS` 必须填写浏览器可以公网解析的域名，不能使用 `turn` 这类 Docker 内部服务名。
+
+默认中继端口段只适合低并发。每路中继都会同时消耗服务器入站与出站带宽，提高并发前需要扩大端口段并监控流量。对于只允许 TLS 的严格网络，需要由 coturn 直接在 `5349` 或 `443` 等公网端口提供 TURN/TLS，HTTP Nginx 路由不能代理 TURN 流量。
+
+`TURN_DETECT_EXTERNAL_IP=yes` 会让 TURN 容器自动探测要通告的公网 IPv4。多层 NAT 或手动路由环境应优先显式设置 `TURN_EXTERNAL_IP`，容器会自动将其映射到私有中继地址；只有需要覆盖该地址时才设置 `TURN_RELAY_IP`。`TURN_MAX_BPS` 用于限制每个中继会话的每秒字节数，默认 1 MiB/s。
 
 ## 单进程部署
 

@@ -26,7 +26,7 @@ function resolveWebSocketUrl() {
   return url.toString();
 }
 
-const ICE_SERVERS = resolveIceServers();
+const BUILD_TIME_ICE_SERVERS = resolveIceServers();
 
 export function useWatchRoom() {
   const videoElement = ref(null);
@@ -78,6 +78,7 @@ export function useWatchRoom() {
   let hls = null;
   let loadedMediaUrl = "";
   let sequence = -1;
+  let iceServers = BUILD_TIME_ICE_SERVERS;
   let serverOffset = 0;
   let bestClockRtt = Infinity;
   let rawVoiceStream = null;
@@ -91,7 +92,7 @@ export function useWatchRoom() {
   let lastHeartbeatServerTime = 0;
   let lastHardSyncAt = 0;
   let smoothedDrift = null;
-  let localNetwork = { latencyMs: null, packetLoss: null, connectionState: "new" };
+  let localNetwork = { latencyMs: null, packetLoss: null, connectionState: "new", path: "checking" };
   let applyingRemote = false;
   let typingTimer = null;
   let lastTypingSent = false;
@@ -224,8 +225,9 @@ export function useWatchRoom() {
   function networkLabel(member) {
     const network = member?.network;
     if (!network || network.latencyMs == null) return "检测中";
-    if (["disconnected", "failed", "closed"].includes(network.connectionState)) return "P2P 异常";
-    return `${network.latencyMs} ms`;
+    if (["disconnected", "failed", "closed"].includes(network.connectionState)) return "连接异常";
+    const pathLabel = network.path === "relay" ? "TURN" : network.path === "direct" ? "P2P" : "";
+    return `${pathLabel ? `${pathLabel} · ` : ""}${network.latencyMs} ms`;
   }
 
   function playbackLabel(member) {
@@ -720,12 +722,26 @@ export function useWatchRoom() {
       const reports = await peer.connection.getStats();
       let received = 0;
       let lost = 0;
+      let selectedPair = null;
       reports.forEach((report) => {
+        if (report.type === "transport" && report.selectedCandidatePairId) {
+          selectedPair = reports.get(report.selectedCandidatePairId) || selectedPair;
+        }
+        if (report.type === "candidate-pair" && report.state === "succeeded" && report.nominated) {
+          selectedPair = selectedPair || report;
+        }
         if (report.type !== "inbound-rtp" || report.kind !== "audio" || report.isRemote) return;
         received += report.packetsReceived || 0;
         lost += report.packetsLost || 0;
       });
       peer.packetLoss = received + lost > 0 ? (lost / (received + lost)) * 100 : null;
+      if (selectedPair) {
+        const localCandidate = reports.get(selectedPair.localCandidateId);
+        const remoteCandidate = reports.get(selectedPair.remoteCandidateId);
+        peer.path = [localCandidate?.candidateType, remoteCandidate?.candidateType].includes("relay")
+          ? "relay"
+          : "direct";
+      }
     } catch {
       peer.packetLoss = null;
     }
@@ -734,7 +750,7 @@ export function useWatchRoom() {
   function refreshLocalNetwork() {
     const peerValues = [...peers.values()];
     if (!peerValues.length) {
-      localNetwork = { latencyMs: null, packetLoss: null, connectionState: "new" };
+      localNetwork = { latencyMs: null, packetLoss: null, connectionState: "new", path: "checking" };
       return;
     }
 
@@ -752,10 +768,12 @@ export function useWatchRoom() {
           : "connecting";
     const latencies = peerValues.map((peer) => peer.latencyMs).filter(Number.isFinite);
     const losses = peerValues.map((peer) => peer.packetLoss).filter(Number.isFinite);
+    const paths = peerValues.map((peer) => peer.path);
     localNetwork = {
       latencyMs: latencies.length ? Math.round(Math.max(...latencies)) : null,
       packetLoss: losses.length ? Math.max(...losses) : null,
       connectionState,
+      path: paths.includes("relay") ? "relay" : paths.includes("direct") ? "direct" : "checking",
     };
   }
 
@@ -814,7 +832,7 @@ export function useWatchRoom() {
 
   function createPeer(peerId, initiator = false) {
     if (peers.has(peerId)) return peers.get(peerId);
-    const connection = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const connection = new RTCPeerConnection({ iceServers });
     const peer = {
       id: peerId,
       connection,
@@ -823,6 +841,7 @@ export function useWatchRoom() {
       pendingCandidates: [],
       latencyMs: null,
       packetLoss: null,
+      path: "checking",
       lastPingAt: 0,
       lastPongAt: Date.now(),
       makingOffer: false,
@@ -1163,6 +1182,7 @@ export function useWatchRoom() {
     }
 
     if (message.type === "joined") {
+      if (Array.isArray(message.iceServers) && message.iceServers.length) iceServers = message.iceServers;
       clientId.value = message.clientId;
       hostId.value = message.hostId;
       roomId.value = message.roomId;
@@ -1179,6 +1199,7 @@ export function useWatchRoom() {
     }
 
     if (message.type === "peer-joined") {
+      if (Array.isArray(message.iceServers) && message.iceServers.length) iceServers = message.iceServers;
       members.set(message.peer.id, message.peer);
       createPeer(message.peer.id, true);
       return;

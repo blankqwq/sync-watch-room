@@ -29,6 +29,13 @@ function readPath(env, name, fallback) {
   return value;
 }
 
+function readList(env, name, fallback = "") {
+  return String(env[name] || fallback)
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
 export function loadConfig(env = process.env) {
   return {
     nodeEnv: env.NODE_ENV || "development",
@@ -40,9 +47,10 @@ export function loadConfig(env = process.env) {
     heartbeatIntervalMs: readInteger(env, "HEARTBEAT_INTERVAL_MS", 5000, { min: 1000, max: 60000 }),
     shutdownTimeoutMs: readInteger(env, "SHUTDOWN_TIMEOUT_MS", 10000, { min: 1000, max: 60000 }),
     maxPayloadBytes: readInteger(env, "WS_MAX_PAYLOAD_BYTES", 65536, { min: 1024, max: 1048576 }),
-    allowedOrigins: String(env.ALLOWED_ORIGINS || "")
-      .split(",")
-      .map((origin) => origin.trim())
-      .filter(Boolean),
+    allowedOrigins: readList(env, "ALLOWED_ORIGINS"),
+    stunUrls: readList(env, "STUN_URLS", "stun:stun.l.google.com:19302"),
+    turnUrls: readList(env, "TURN_URLS"),
+    turnSharedSecret: String(env.TURN_SHARED_SECRET || ""),
+    turnCredentialTtlSeconds: readInteger(env, "TURN_CREDENTIAL_TTL_SECONDS", 3600, { min: 300, max: 86400 }),
   };
 }

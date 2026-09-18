@@ -20,6 +20,7 @@
 - 展示每位成员的缓存进度、延迟、丢包、语音和连接状态
 - 实时聊天、正在输入状态、房间事件和成员在线状态
 - WebRTC 多人语音、静音、RNNoise 降噪和麦克风音量调节
+- 后端签发短期 TURN 凭证，WebRTC 直连失败时自动回退中继
 - WebSocket 心跳检测、房间状态恢复和房主自动转移
 - 浏览器原生播放 MP4/WebM，通过 `hls.js` 播放 HLS/M3U8
 - 支持桌面端与移动端，并提供移动端全屏播放控制
@@ -119,15 +120,15 @@ npm run dev
 - `0%`（静音）到 `250%`（放大）的麦克风音量
 - 麦克风静音和成员语音状态
 
-P2P 直连时语音不会经过房间服务器。生产环境应单独部署 TURN，并根据并发量规划和限制带宽。
+P2P 直连时语音不会经过房间服务器。直连失败时，后端会为内置 coturn 服务签发短期凭证，WebRTC 自动尝试 TURN 中继；成员网络状态会显示当前使用 `P2P` 还是 `TURN`。TURN 会消耗服务器带宽，需要按并发量规划容量。
 
 ## 生产部署
 
-仓库内已经提供 Vue 前端与 Node.js 信令服务的独立生产镜像、Nginx WebSocket 反向代理、健康检查、优雅退出和 Docker Compose 编排。
+仓库内已经提供 Vue 前端、Node.js 信令后端和 coturn 中继服务，以及 Nginx WebSocket 反向代理、健康检查、优雅退出和 Docker Compose 编排。
 
 ```bash
 cp .env.example .env
-# 对外开放前，请设置 ALLOWED_ORIGINS 和生产 ICE/TURN 服务。
+# 对外开放前，请设置 ALLOWED_ORIGINS、TURN 地址和新的 TURN 共享密钥。
 docker compose up --build -d
 ```
 
@@ -141,7 +142,7 @@ docker compose up --build -d
 
 - 房间与消息持久化
 - 身份认证和房间权限
-- 带宽受控的 TURN 服务
+- TURN 容量限制与用量监控
 - 按用户限流和结合权限的严格输入校验
 - 共享房间状态与按房间路由的多实例部署
 - WebSocket、WebRTC、媒体和房主转移事件监控

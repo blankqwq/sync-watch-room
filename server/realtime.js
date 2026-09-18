@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { WebSocket, WebSocketServer } from "ws";
 
-export function attachRealtimeServer(server, config, logger) {
+export function attachRealtimeServer(server, config, logger, createIceServers) {
   const rooms = new Map();
   const allowedOrigins = new Set(config.allowedOrigins);
   const wss = new WebSocketServer({
@@ -79,6 +79,7 @@ export function attachRealtimeServer(server, config, logger) {
     const latency = Number(network.latencyMs);
     const packetLoss = Number(network.packetLoss);
     const connectionStates = new Set(["new", "connecting", "connected", "disconnected", "failed", "closed"]);
+    const connectionPaths = new Set(["checking", "direct", "relay"]);
 
     return {
       playback: {
@@ -93,6 +94,7 @@ export function attachRealtimeServer(server, config, logger) {
         latencyMs: Number.isFinite(latency) ? Math.max(0, Math.min(10000, Math.round(latency))) : null,
         packetLoss: Number.isFinite(packetLoss) ? Math.max(0, Math.min(100, packetLoss)) : null,
         connectionState: connectionStates.has(network.connectionState) ? network.connectionState : "new",
+        path: connectionPaths.has(network.path) ? network.path : "checking",
       },
     };
   }
@@ -209,8 +211,16 @@ export function attachRealtimeServer(server, config, logger) {
           members: [...room.clients.values()].map(publicMember),
           messages: room.messages,
           state: currentState(room),
+          iceServers: createIceServers(session.id),
         });
-        broadcast(room, { type: "peer-joined", peer: publicMember(session) }, session.id);
+        for (const [clientId, client] of room.clients) {
+          if (clientId === session.id) continue;
+          send(client.socket, {
+            type: "peer-joined",
+            peer: publicMember(session),
+            iceServers: createIceServers(clientId),
+          });
+        }
         appendSystemMessage(room, `${session.name}加入了房间`);
         return;
       }
