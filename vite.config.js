@@ -8,7 +8,7 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       "/ws": {
-        target: "ws://localhost:4174",
+        target: process.env.WS_PROXY_TARGET || "ws://localhost:4174",
         ws: true,
       },
     },

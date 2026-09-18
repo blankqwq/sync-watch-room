@@ -1,0 +1,36 @@
+name: sync-watch-room
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 4174
+      WS_PATH: /ws
+      SERVE_STATIC: "false"
+      HEARTBEAT_INTERVAL_MS: ${HEARTBEAT_INTERVAL_MS:-5000}
+      SHUTDOWN_TIMEOUT_MS: ${SHUTDOWN_TIMEOUT_MS:-10000}
+      WS_MAX_PAYLOAD_BYTES: ${WS_MAX_PAYLOAD_BYTES:-65536}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+      args:
+        VITE_WS_URL: ${VITE_WS_URL:-}
+        VITE_ICE_SERVERS: ${VITE_ICE_SERVERS:-}
+    environment:
+      BACKEND_HOST: backend
+      BACKEND_PORT: 4174
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${APP_PORT:-8088}:8080"
+    restart: unless-stopped

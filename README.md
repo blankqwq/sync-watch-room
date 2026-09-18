@@ -76,9 +76,13 @@ During development:
 | Command | Description |
 | --- | --- |
 | `npm run dev` | Start the frontend and WebSocket server in development mode |
+| `npm run dev:web` | Start only the Vite frontend |
+| `npm run dev:server` | Start only the Node.js server with file watching |
 | `npm run build` | Build the Vue application into `dist/` |
 | `npm run preview` | Preview the production frontend build |
 | `npm start` | Serve `dist/` and WebSocket connections from Node.js |
+| `npm test` | Run the Node.js server tests |
+| `npm run check` | Run server tests and the production frontend build |
 
 ## Media Sources
 
@@ -117,20 +121,34 @@ Voice uses WebRTC audio tracks. The microphone settings include:
 
 Direct peer connections do not send voice through the room server. Production deployments should provide a separately capacity-planned TURN service for networks where direct WebRTC connectivity fails.
 
-## Production Notes
+## Production Deployment
 
-The current server keeps rooms and chat history in process memory. A production deployment should add:
+The repository includes separate production images for the Vue frontend and Node.js signaling service, an Nginx WebSocket reverse proxy, health checks, graceful shutdown, and a Docker Compose definition.
+
+```bash
+cp .env.example .env
+# Set ALLOWED_ORIGINS and production ICE/TURN servers before exposing the service.
+docker compose up --build -d
+```
+
+Open `http://localhost:8088`. Put an HTTPS load balancer or reverse proxy in front of this endpoint in production. See the [deployment guide](./docs/deployment.md) for environment variables, standalone deployment, health endpoints, upgrades, and scaling limits.
+
+The server keeps rooms and chat history in process memory. Run one backend replica unless room state is moved to shared storage and WebSocket routing is made room-aware.
+
+## Production Backlog
+
+For an internet-facing service, the next application-level controls should include:
 
 - Persistent room and message storage
 - Authentication and room authorization
 - A TURN service with bandwidth limits
-- Request throttling and input validation
-- Multi-instance room routing or sticky sessions
+- Per-user request throttling and stronger authorization-aware validation
+- Shared room state and room-aware multi-instance routing
 - Observability for WebSocket, WebRTC, media, and host-failover events
 
 ## Project Status
 
-This repository is an early-stage reference implementation. The synchronization, chat, voice, buffering, heartbeat, and host-failover flows are implemented, but the production concerns above remain intentionally out of scope.
+This repository is an early-stage reference implementation. Synchronization, chat, voice, buffering, heartbeat, host failover, health checks, graceful shutdown, and container deployment are implemented. Persistence, authentication, and horizontal scaling remain future work.
 
 ## Contributing
 

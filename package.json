@@ -5,20 +5,27 @@
   "license": "MIT",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=20.19"
+  },
   "scripts": {
-    "dev": "concurrently -k -n server,web -c yellow,cyan \"PORT=4174 node server.js\" \"vite\"",
+    "dev": "concurrently -k -n server,web -c yellow,cyan \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "PORT=4174 SERVE_STATIC=false node --watch server/index.js",
+    "dev:web": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "start": "node server.js"
+    "start": "node server/index.js",
+    "test": "node --test server/*.test.js",
+    "check": "npm test && npm run build"
   },
   "dependencies": {
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
     "@sapphi-red/web-noise-suppressor": "^0.4.0",
     "hls.js": "^1.7.3",
     "lucide-vue-next": "^0.544.0",
     "vue": "^3.5.21",
-    "ws": "^8.18.3"
-  },
-  "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.1",
     "concurrently": "^9.2.1",
     "vite": "^7.1.5"

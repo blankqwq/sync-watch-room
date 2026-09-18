@@ -1,0 +1,12 @@
+.git
+.gitignore
+.playwright-cli
+.env
+.env.*
+!.env.example
+dist
+docs
+node_modules
+npm-debug.log*
+output
+README*

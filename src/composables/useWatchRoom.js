@@ -1,10 +1,32 @@
 import { computed, nextTick, onBeforeUnmount, reactive, ref } from "vue";
 
-const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+const DEFAULT_ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
 const COMMAND_DELAY_MS = 350;
 const MIN_BUFFER_AHEAD_SECONDS = 1.5;
 const BUFFERING_GRACE_MS = 600;
 const HARD_SYNC_THRESHOLD_SECONDS = 0.75;
+
+function resolveIceServers() {
+  const configuredServers = import.meta.env.VITE_ICE_SERVERS;
+  if (!configuredServers) return DEFAULT_ICE_SERVERS;
+  try {
+    const servers = JSON.parse(configuredServers);
+    if (Array.isArray(servers) && servers.length) return servers;
+  } catch {
+    console.warn("VITE_ICE_SERVERS must be a valid JSON array; using the default STUN server.");
+  }
+  return DEFAULT_ICE_SERVERS;
+}
+
+function resolveWebSocketUrl() {
+  const configuredUrl = import.meta.env.VITE_WS_URL?.trim() || "/ws";
+  const url = new URL(configuredUrl, location.href);
+  if (url.protocol === "http:") url.protocol = "ws:";
+  if (url.protocol === "https:") url.protocol = "wss:";
+  return url.toString();
+}
+
+const ICE_SERVERS = resolveIceServers();
 
 export function useWatchRoom() {
   const videoElement = ref(null);
@@ -1202,8 +1224,7 @@ export function useWatchRoom() {
     if (!name) return;
     localStorage.setItem("watch-name", name);
     connectionLabel.value = "连接中";
-    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    socket = new WebSocket(`${protocol}//${location.host}/ws`);
+    socket = new WebSocket(resolveWebSocketUrl());
     socket.addEventListener("open", () => {
       updateConnectionStatus();
       send({ type: "join", roomId: requestedRoomId, name });
