@@ -1,6 +1,7 @@
 .git
 .gitignore
 .playwright-cli
+.tmp
 .env
 .env.*
 !.env.example

@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { loadConfig } from "./config.js";
 
 test("loadConfig returns production-safe server defaults", () => {
@@ -32,4 +36,34 @@ test("loadConfig rejects invalid values", () => {
   assert.throws(() => loadConfig({ PORT: "invalid" }), /PORT must be an integer/);
   assert.throws(() => loadConfig({ SERVE_STATIC: "yes" }), /SERVE_STATIC must be either true or false/);
   assert.throws(() => loadConfig({ WS_PATH: "ws" }), /WS_PATH must be an absolute URL path/);
+  assert.throws(() => loadConfig({ MACCMS_SOURCES: "bad|http://example.com/api.php/provide/vod/" }), /HTTPS video provide URLs/);
+});
+
+test("loadConfig reads administrator, OSS, and MacCMS settings", () => {
+  const config = loadConfig({
+    ADMIN_TOKEN: "secret", MACCMS_SOURCES: "Catalog|https://example.com/api.php/provide/vod/",
+    OSS_REGION: "oss-cn-hangzhou", OSS_BUCKET: "movies", OSS_PUBLIC_URL: "https://cdn.example.com/",
+  });
+  assert.equal(config.adminToken, "secret");
+  assert.equal(config.macCmsSources[0].name, "Catalog");
+  assert.equal(config.oss.publicUrl, "https://cdn.example.com");
+});
+
+test("environment files configure native startup while inherited values take precedence", (context) => {
+  const directory = mkdtempSync(join(tmpdir(), "watch-env-"));
+  context.after(() => rmSync(directory, { recursive: true, force: true }));
+  const filePath = join(directory, ".env");
+  writeFileSync(filePath, "ADMIN_TOKEN=from-file\nMACCMS_SOURCES=Catalog|https://example.com/api.php/provide/vod/\n");
+  const configUrl = new URL("./config.js", import.meta.url).href;
+  const script = `import { loadConfig, loadEnvironment } from ${JSON.stringify(configUrl)};
+    loadEnvironment(${JSON.stringify(filePath)});
+    loadEnvironment(${JSON.stringify(join(directory, "missing.env"))});
+    const config = loadConfig();
+    console.log(JSON.stringify({ token: config.adminToken, sources: config.macCmsSources }));`;
+  const output = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+    env: { ...process.env, ADMIN_TOKEN: "inherited", MACCMS_SOURCES: undefined }, encoding: "utf8",
+  });
+  const config = JSON.parse(output);
+  assert.equal(config.token, "inherited");
+  assert.equal(config.sources[0].name, "Catalog");
 });

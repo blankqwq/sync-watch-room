@@ -20,7 +20,7 @@ Nginx 前端 :8080 ── /ws ──▶ Node.js 后端 :4174
 浏览器 ◀──── WebRTC 语音 ─▶ 浏览器
 ```
 
-前端、后端与 coturn 中继分别运行。Nginx 托管构建后的 Vue 应用，并将 `/ws` 转发到 Node.js；后端签发临时 TURN REST 凭证，coturn 负责 STUN 和中继流量。视频继续存放在 OSS/CDN，不经过应用容器。
+前端、后端与 coturn 中继分别运行。Nginx 托管构建后的 Vue 应用，并将 `/api/` 和 `/ws` 转发到 Node.js；后端签发临时 TURN REST 凭证，coturn 负责 STUN 和中继流量。视频继续存放在 OSS/CDN，不经过应用容器。
 
 ## Docker Compose
 
@@ -85,6 +85,8 @@ Vite 变量会在镜像构建时写入前端资源。正常部署由后端动态
 
 ### 后端运行变量
 
+原生启动会自动读取项目根目录 `.env`，进程环境变量优先生效。Compose 将同一文件中的配置传给后端，并固定使用 `/app/data` 持久卷。
+
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
 | `HOST` | `0.0.0.0` | 监听地址 |
@@ -92,6 +94,14 @@ Vite 变量会在镜像构建时写入前端资源。正常部署由后端动态
 | `WS_PATH` | `/ws` | WebSocket 路径 |
 | `SERVE_STATIC` | `true` | 是否由 Node.js 托管 `dist/`；Compose 中关闭 |
 | `ALLOWED_ORIGINS` | 空 | 逗号分隔的 WebSocket 浏览器来源；空值允许所有来源 |
+| `ADMIN_TOKEN` | 空 | 后台令牌；空值禁用后台接口；部署脚本自动生成 |
+| `DATA_DIR` | 项目 `data/` | 旧 JSON 首次迁移路径；Compose 挂载 `/app/data` |
+| `DATABASE_URL` | 必填 | PostgreSQL 连接地址；Compose 后端使用内部 `postgres:5432` |
+| `POSTGRES_PASSWORD` | 必填 | 本地数据库密码，部署脚本自动生成并保留已有值 |
+| `POSTGRES_PORT` | `55432` | 本地数据库端口，仅绑定 `127.0.0.1` |
+| `SESSION_COOKIE_SECURE` | 生产环境 `true` | HTTPS 登录 Cookie；开发命令覆盖为 `false` |
+| `MACCMS_SOURCES` | 空 | 初始来源：`名称|HTTPS 苹果 CMS V10 视频接口`，多个用逗号分隔；后台设置保存在 `sources.json` |
+| `OSS_REGION`、`OSS_BUCKET`、`OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET`、`OSS_PUBLIC_URL` | 空 | OSS 区域、桶、访问密钥和公开访问地址；全部填写才启用上传 |
 | `HEARTBEAT_INTERVAL_MS` | `5000` | 无效 WebSocket 检测周期 |
 | `WS_MAX_PAYLOAD_BYTES` | `65536` | 单条 WebSocket 消息大小上限 |
 | `SHUTDOWN_TIMEOUT_MS` | `10000` | 优雅退出最长等待时间 |
@@ -131,4 +141,4 @@ NODE_ENV=production HOST=127.0.0.1 PORT=4173 SERVE_STATIC=true npm start
 
 ## 扩容边界
 
-房间状态、房主身份和最近消息仍保存在单个 Node.js 进程中，因此后端应保持一个副本。横向扩容前，需要实现共享房间状态、跨实例事件投递，并确保同一房间成员路由到同一个状态所有者。直接使用轮询负载均衡会拆散房间并破坏同步。
+资源、来源、用户、登录会话、观看历史以及房间检查点保存在 PostgreSQL。运行中的成员连接和房主选举由一个 Node.js 进程维护，因此后端保持一个副本；横向扩容前需实现跨实例事件投递和房间路由。旧 `data/*.json` 仅在数据库没有对应记录时用于首次迁移，后续写入不会更新旧文件。

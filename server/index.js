@@ -1,9 +1,10 @@
 import { createApplication } from "./app.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, loadEnvironment } from "./config.js";
 import { createLogger } from "./logger.js";
 
 let config;
 try {
+  loadEnvironment();
   config = loadConfig();
 } catch (error) {
   console.error(`Invalid server configuration: ${error.message}`);

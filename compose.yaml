@@ -1,6 +1,23 @@
 name: sync-watch-room
 
 services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-watch_room}
+      POSTGRES_DB: ${POSTGRES_DB:-watch_room}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
   backend:
     build:
       context: .
@@ -15,10 +32,25 @@ services:
       SHUTDOWN_TIMEOUT_MS: ${SHUTDOWN_TIMEOUT_MS:-10000}
       WS_MAX_PAYLOAD_BYTES: ${WS_MAX_PAYLOAD_BYTES:-65536}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      DATA_DIR: /app/data
+      DATABASE_URL: postgresql://${POSTGRES_USER:-watch_room}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-watch_room}
+      SESSION_COOKIE_SECURE: "true"
+      MACCMS_SOURCES: ${MACCMS_SOURCES:-}
+      OSS_REGION: ${OSS_REGION:-}
+      OSS_BUCKET: ${OSS_BUCKET:-}
+      OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:-}
+      OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
+      OSS_PUBLIC_URL: ${OSS_PUBLIC_URL:-}
       STUN_URLS: ${STUN_URLS:-stun:localhost:3478}
       TURN_URLS: ${TURN_URLS:-turn:localhost:3478?transport=udp,turn:localhost:3478?transport=tcp}
       TURN_SHARED_SECRET: ${TURN_SHARED_SECRET:?Set TURN_SHARED_SECRET in .env}
       TURN_CREDENTIAL_TTL_SECONDS: ${TURN_CREDENTIAL_TTL_SECONDS:-3600}
+    volumes:
+      - catalog-data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     stop_grace_period: 15s
 
@@ -59,3 +91,7 @@ services:
     ports:
       - "${APP_BIND:-0.0.0.0}:${APP_PORT:-8088}:8080"
     restart: unless-stopped
+
+volumes:
+  catalog-data:
+  postgres-data:

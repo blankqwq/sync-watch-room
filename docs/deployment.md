@@ -85,6 +85,8 @@ Vite variables are embedded at image build time. The normal deployment receives 
 
 ### Backend runtime variables
 
+Native startup reads the project-root `.env` without overriding inherited environment variables. Compose passes settings from that file to the backend and mounts persistent catalog storage at `/app/data`.
+
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `HOST` | `0.0.0.0` | Listen address |
@@ -92,6 +94,14 @@ Vite variables are embedded at image build time. The normal deployment receives 
 | `WS_PATH` | `/ws` | WebSocket endpoint |
 | `SERVE_STATIC` | `true` | Serve `dist/` from Node.js; Compose disables it |
 | `ALLOWED_ORIGINS` | empty | Comma-separated WebSocket browser origins; empty accepts all origins |
+| `ADMIN_TOKEN` | empty | Admin bearer token; empty disables admin endpoints; the setup script generates one |
+| `DATA_DIR` | project `data/` | Legacy JSON migration directory; Compose mounts `/app/data` |
+| `DATABASE_URL` | required | PostgreSQL connection URL; Compose uses the internal `postgres:5432` service |
+| `POSTGRES_PASSWORD` | required | Generated local database password; the setup script preserves existing values |
+| `POSTGRES_PORT` | `55432` | Loopback-only PostgreSQL port |
+| `SESSION_COOKIE_SECURE` | `true` in production | Secure session cookies; local development overrides to `false` |
+| `MACCMS_SOURCES` | empty | Initial `Label|HTTPS MacCMS V10 endpoint` entries, comma-separated; admin settings persist in `sources.json` |
+| `OSS_REGION`, `OSS_BUCKET`, `OSS_ACCESS_KEY_ID`, `OSS_ACCESS_KEY_SECRET`, `OSS_PUBLIC_URL` | empty | OSS upload settings; all values are required to enable uploads |
 | `HEARTBEAT_INTERVAL_MS` | `5000` | Dead WebSocket detection interval |
 | `WS_MAX_PAYLOAD_BYTES` | `65536` | Maximum WebSocket message size |
 | `SHUTDOWN_TIMEOUT_MS` | `10000` | Maximum graceful shutdown duration |
@@ -131,4 +141,4 @@ Place a TLS reverse proxy in front of port `4173` and forward WebSocket upgrades
 
 ## Scaling Boundary
 
-Room state, host ownership, and recent messages currently live in one Node.js process. Keep the backend at one replica. Horizontal scaling requires shared room state, cross-instance event delivery, and routing all members of a room to the same state owner. Plain round-robin replicas will split rooms and break synchronization.
+PostgreSQL persists resources, sources, accounts, sessions, personal watch progress and room checkpoints. Active member connections and host election are owned by one backend process. Keep one replica until cross-instance event routing is implemented. Legacy JSON files are migration seeds only; existing database records take precedence.

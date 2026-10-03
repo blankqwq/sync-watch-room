@@ -7,6 +7,7 @@ RUN npm ci
 COPY index.html vite.config.js ./
 COPY public ./public
 COPY src ./src
+COPY shared ./shared
 
 ARG VITE_WS_URL=
 ARG VITE_ICE_SERVERS=

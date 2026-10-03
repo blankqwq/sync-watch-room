@@ -154,6 +154,28 @@ if [ "${#turn_secret}" -lt 32 ]; then
   echo "TURN shared secret must contain at least 32 characters" >&2
   exit 1
 fi
+
+if command -v openssl >/dev/null 2>&1; then
+  admin_token=$(openssl rand -hex 32)
+  postgres_password=$(openssl rand -hex 24)
+else
+  admin_token=$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')
+  postgres_password=$(node -e 'process.stdout.write(require("node:crypto").randomBytes(24).toString("hex"))')
+fi
+postgres_user=watch_room
+postgres_db=watch_room
+postgres_port=55432
+database_url=""
+existing_env_value() { awk -v key="$1" 'index($0, key "=")==1 { sub(/^[^=]*=/, ""); print; exit }' "$env_file"; }
+if [ -f "$env_file" ]; then
+  existing_postgres_password=$(existing_env_value POSTGRES_PASSWORD)
+  if [ -n "$existing_postgres_password" ]; then postgres_password=$existing_postgres_password; fi
+  postgres_user=$(existing_env_value POSTGRES_USER); postgres_user=${postgres_user:-watch_room}
+  postgres_db=$(existing_env_value POSTGRES_DB); postgres_db=${postgres_db:-watch_room}
+  postgres_port=$(existing_env_value POSTGRES_PORT); postgres_port=${postgres_port:-55432}
+  database_url=$(existing_env_value DATABASE_URL)
+fi
+database_url=${database_url:-postgresql://$postgres_user:$postgres_password@127.0.0.1:$postgres_port/$postgres_db}
 case "$turn_secret" in
   *[!A-Za-z0-9_-]*) echo "TURN shared secret contains unsupported characters" >&2; exit 1 ;;
 esac
@@ -175,6 +197,19 @@ APP_BIND=127.0.0.1
 VITE_WS_URL=
 
 ALLOWED_ORIGINS=https://$watch_domain
+ADMIN_TOKEN=$admin_token
+DATA_DIR=
+POSTGRES_USER=$postgres_user
+POSTGRES_DB=$postgres_db
+POSTGRES_PASSWORD=$postgres_password
+POSTGRES_PORT=$postgres_port
+DATABASE_URL=$database_url
+MACCMS_SOURCES=
+OSS_REGION=
+OSS_BUCKET=
+OSS_ACCESS_KEY_ID=
+OSS_ACCESS_KEY_SECRET=
+OSS_PUBLIC_URL=
 
 STUN_URLS=stun:$turn_domain:3478
 TURN_URLS=turn:$turn_domain:3478?transport=udp,turn:$turn_domain:3478?transport=tcp

@@ -1,10 +1,11 @@
 import { computed, nextTick, onBeforeUnmount, reactive, ref } from "vue";
+import { SYNC_TICK_MS, SYNC_LEASE_MS, SYNC_PROTOCOL, MAX_SYNC_DELAY_MS, MAX_DRIFT_SECONDS, ALIGN_TOLERANCE_SECONDS } from "../../shared/sync.js";
+import { checkMediaAvailability, clearMediaFailure, markMediaAvailable, markMediaUnavailable } from "../media-availability.js";
+import { describeHlsError } from "../media-errors.js";
 
 const DEFAULT_ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
 const COMMAND_DELAY_MS = 350;
 const MIN_BUFFER_AHEAD_SECONDS = 1.5;
-const BUFFERING_GRACE_MS = 600;
-const HARD_SYNC_THRESHOLD_SECONDS = 0.75;
 
 function resolveIceServers() {
   const configuredServers = import.meta.env.VITE_ICE_SERVERS;
@@ -36,6 +37,30 @@ export function useWatchRoom() {
   const joined = ref(false);
   const joinName = ref(localStorage.getItem("watch-name") || "");
   const joinRoomId = ref(new URLSearchParams(location.search).get("room") || "");
+  const selectedResource = ref(null);
+  const playlist = ref([]);
+  const playlistTitle = ref("");
+  const playlistIndex = ref(-1);
+  const autoAdvance = ref(true);
+  const availableLines = ref([]);
+  const linesLoading = ref(false);
+  const lineLabel = ref("默认线路");
+  const qualityLevels = ref([]);
+  const selectedQuality = ref(-1);
+  const currentQuality = ref(-1);
+  const qualityMode = ref("original");
+  const videoHeight = ref(0);
+  const currentQualityLabel = computed(() => {
+    const level = qualityLevels.value.find((item) => item.index === currentQuality.value);
+    return videoHeight.value ? `${videoHeight.value}p` : level?.label || "";
+  });
+  const qualitySummary = computed(() => `${qualityMode.value === "native" ? "自动画质" : "原画"}${currentQualityLabel.value ? ` · ${currentQualityLabel.value}` : ""}`);
+  const joining = ref(false);
+  const requiresLogin = ref(false);
+  const accountSignedOut = ref(false);
+  let reconnectTimer = null;
+  let disposed = false;
+  let playbackGeneration = 0;
   const clientId = ref(null);
   const hostId = ref(null);
   const roomId = ref(null);
@@ -49,12 +74,17 @@ export function useWatchRoom() {
   const activeTab = ref("chat");
 
   const mediaUrl = ref("");
+  const mediaLoadError = ref("");
   const mediaTitle = ref("尚未添加视频");
+  const mediaPoster = ref("");
   const currentTime = ref(0);
   const duration = ref(0);
   const seekPreview = ref(null);
   const playerPaused = ref(true);
   const waitingForPeers = ref(false);
+  const syncBlocked = ref(false);
+  const autoplayBlocked = ref(false);
+  const syncPauseReason = ref("");
   const volume = ref(1);
   const videoMuted = ref(false);
 
@@ -77,20 +107,24 @@ export function useWatchRoom() {
   let socket = null;
   let hls = null;
   let loadedMediaUrl = "";
+  let lineRequestVersion = 0;
+  let sourceGeneration = 0;
   let sequence = -1;
   let iceServers = BUILD_TIME_ICE_SERVERS;
   let serverOffset = 0;
   let bestClockRtt = Infinity;
+  let clockRtt = Infinity;
+  let authorityState = null;
+  let lastAuthorityAt = 0;
   let rawVoiceStream = null;
   let localVoiceStream = null;
   let voicePipeline = null;
   let rnnoiseResourcesPromise = null;
   let playbackBuffering = false;
-  let bufferingTimer = null;
   let pendingPlaybackBarrier = null;
   let lastPublishedStatus = "";
   let lastHeartbeatServerTime = 0;
-  let lastHardSyncAt = 0;
+  let lastEndedSequence = -1;
   let smoothedDrift = null;
   let localNetwork = { latencyMs: null, packetLoss: null, connectionState: "new", path: "checking" };
   let applyingRemote = false;
@@ -127,13 +161,16 @@ export function useWatchRoom() {
   });
   const roomHealth = computed(() => {
     if (!mediaUrl.value) return { label: "等待片源", tone: "idle" };
+    if (syncPauseReason.value) return { label: syncPauseReason.value, tone: "waiting" };
+    if (syncBlocked.value) return { label: "同步信号不稳定，已保护暂停", tone: "waiting" };
+    if (autoplayBlocked.value) return { label: "点击画面允许同步播放", tone: "waiting" };
     const memberValues = [...members.values()];
     const bufferingMembers = memberValues.filter((member) => member.playback?.mediaUrl !== mediaUrl.value
       || member.playback.buffering
       || !member.playback.ready);
     if (waitingForPeers.value || bufferingMembers.length) {
       const names = bufferingMembers.map((member) => member.id === clientId.value ? "你" : member.name).slice(0, 2);
-      return { label: names.length ? `等待 ${names.join("、")} 缓冲` : "等待全员缓冲", tone: "waiting" };
+      return { label: names.length ? `等待 ${names.join("、")} 缓冲` : "已暂停，等待全员同步", tone: "waiting" };
     }
     const poorNetwork = memberValues.some((member) => networkTone(member) === "poor");
     if (poorNetwork) return { label: "网络波动，正在保持同步", tone: "poor" };
@@ -198,18 +235,21 @@ export function useWatchRoom() {
       loadedPercent = Math.min(100, (video.buffered.end(video.buffered.length - 1) / video.duration) * 100);
     }
     const nearEnd = Number.isFinite(video.duration) && video.duration - position < MIN_BUFFER_AHEAD_SECONDS;
-    const hasPlayableBuffer = ahead >= MIN_BUFFER_AHEAD_SECONDS
-      || video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA
-      || nearEnd;
-    const ready = !playbackBuffering && hasPlayableBuffer;
+    const hasPlayableBuffer = video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA && (ahead >= MIN_BUFFER_AHEAD_SECONDS || nearEnd);
+    const ready = navigator.onLine && !playbackBuffering && !video.seeking && !syncBlocked.value && !autoplayBlocked.value && document.visibilityState === "visible" && hasPlayableBuffer;
 
     return {
       mediaUrl: mediaUrl.value,
       position,
+      duration: Number.isFinite(video.duration) ? video.duration : 0,
       ready,
       buffering: playbackBuffering,
       bufferedAhead: ahead,
       loadedPercent,
+      paused: video.paused,
+      sequence,
+      sampledAt: estimatedServerTime(),
+      syncRttMs: Number.isFinite(clockRtt) ? clockRtt : 10000,
     };
   }
 
@@ -284,13 +324,13 @@ export function useWatchRoom() {
     if (isHost.value) evaluatePlaybackBarrier();
   }
 
-  function showToast(message) {
+  function showToast(message, duration = 1600) {
     toast.value = message;
     toastVisible.value = true;
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => {
       toastVisible.value = false;
-    }, 1600);
+    }, duration);
   }
 
   function updateConnectionStatus() {
@@ -311,40 +351,79 @@ export function useWatchRoom() {
   function destroyHls() {
     hls?.destroy();
     hls = null;
+    qualityLevels.value = [];
+    selectedQuality.value = -1;
+    currentQuality.value = -1;
+    qualityMode.value = "original";
+    videoHeight.value = 0;
   }
 
-  async function loadVideoSource(video, url) {
+  function updateQualityLevels(controller) {
+    if (hls !== controller) return;
+    qualityLevels.value = controller.levels.map((level, index) => {
+      const bitrate = level.bitrate >= 1000000 ? `${(level.bitrate / 1000000).toFixed(1)} Mbps` : `${Math.round(level.bitrate / 1000)} kbps`;
+      const duplicateHeight = level.height && controller.levels.filter((item) => item.height === level.height).length > 1;
+      const label = level.height ? `${level.height}p${duplicateHeight ? ` · ${bitrate}` : ""}` : level.bitrate ? bitrate : `画质 ${index + 1}`;
+      return { index, label, height: level.height || 0, bitrate: level.bitrate || 0, audioOnly: !level.videoCodec && Boolean(level.audioCodec) && !level.height };
+    }).filter((level) => !level.audioOnly).sort((a, b) => b.height - a.height || b.bitrate - a.bitrate);
+    selectedQuality.value = controller.autoLevelEnabled ? -1 : controller.manualLevel;
+  }
+
+  function changeQuality(event) {
+    const index = Number(event.target.value);
+    if (!hls || !Number.isInteger(index) || (index !== -1 && !qualityLevels.value.some((level) => level.index === index))) return;
+    selectedQuality.value = index;
+    hls.nextLevel = index;
+    showToast(index === -1 ? "已切换为自动画质" : `已选择 ${qualityLevels.value.find((level) => level.index === index).label}`);
+  }
+
+  async function loadVideoSource(video, url, skipCheck = false) {
+    const generation = ++sourceGeneration;
     destroyHls();
-    clearTimeout(bufferingTimer);
-    bufferingTimer = null;
+    mediaLoadError.value = "";
     playbackBuffering = true;
     loadedMediaUrl = url;
+    video.pause();
     video.removeAttribute("src");
     publishMemberStatus(true);
 
     if (isHlsMedia(url)) {
+      try { if (!skipCheck) await checkMediaAvailability(url); }
+      catch (cause) { if (generation === sourceGeneration && !disposed) failMedia(url, cause.message, cause.unavailable); return; }
+      if (generation !== sourceGeneration || disposed) return;
       const canPlayNative = Boolean(video.canPlayType("application/vnd.apple.mpegurl"));
-      if (canPlayNative && "ManagedMediaSource" in window) {
-        video.src = url;
-        video.load();
-        return;
-      }
       const { default: Hls } = await import("hls.js");
-      if (loadedMediaUrl !== url || mediaUrl.value !== url) return;
+      if (generation !== sourceGeneration || disposed || loadedMediaUrl !== url || mediaUrl.value !== url) return;
       if (Hls.isSupported()) {
-        hls = new Hls({ enableWorker: true, lowLatencyMode: true, backBufferLength: 90 });
+        const controller = new Hls({ enableWorker: true, lowLatencyMode: true, backBufferLength: 90 });
+        hls = controller;
+        qualityMode.value = "hls";
+        let mediaRecoveries = 0;
+        let crossOriginNotified = false;
+        controller.on(Hls.Events.FRAG_LOADED, () => { if (hls === controller) markMediaAvailable(url); });
+        controller.on(Hls.Events.MANIFEST_PARSED, () => updateQualityLevels(controller));
+        controller.on(Hls.Events.LEVELS_UPDATED, () => updateQualityLevels(controller));
+        controller.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => {
+          if (hls !== controller) return;
+          currentQuality.value = data.level;
+          selectedQuality.value = controller.autoLevelEnabled ? -1 : controller.manualLevel;
+        });
         hls.on(Hls.Events.ERROR, (_event, data) => {
-          if (!data.fatal) return;
-          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-            showToast("HLS 网络加载失败，正在重试");
-            hls?.startLoad();
-          } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          if (hls !== controller) return;
+          const failedUrl = data.url || data.context?.url || data.frag?.url || url;
+          const reason = describeHlsError(data, failedUrl, location.origin, navigator.onLine);
+          if (!data.fatal) {
+            if (!crossOriginNotified && ["cors", "cross-origin"].includes(reason.kind)) {
+              crossOriginNotified = true;
+              showToast(reason.message, 5000);
+            }
+            return;
+          }
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRecoveries++ < 1) {
             showToast("HLS 解码异常，正在恢复");
             hls?.recoverMediaError();
           } else {
-            loadedMediaUrl = "";
-            destroyHls();
-            showToast("该 HLS 片源无法播放");
+            failMedia(url, reason.message, true);
           }
         });
         hls.loadSource(url);
@@ -353,18 +432,40 @@ export function useWatchRoom() {
       }
 
       if (canPlayNative) {
+        qualityMode.value = "native";
         video.src = url;
         video.load();
         return;
       }
 
-      loadedMediaUrl = "";
-      showToast("当前浏览器不支持 HLS 播放");
+      failMedia(url, "当前浏览器不支持 HLS 播放，请选择其他资源", true);
       return;
     }
 
     video.src = url;
     video.load();
+  }
+
+  function failMedia(url, message, unavailable = false) {
+    if (url !== mediaUrl.value) return;
+    if (unavailable && navigator.onLine) markMediaUnavailable(url);
+    mediaLoadError.value = message;
+    playbackBuffering = true;
+    destroyHls();
+    pauseForSafety(message);
+    videoElement.value?.removeAttribute("src");
+    videoElement.value?.load();
+    publishMemberStatus(true);
+    showToast(message);
+  }
+
+  function retryMedia() {
+    const video = videoElement.value;
+    if (!video || !mediaUrl.value) return;
+    pauseForSafety("重新加载片源，等待全员同步");
+    clearMediaFailure(mediaUrl.value);
+    showToast("正在重新加载片源");
+    loadVideoSource(video, mediaUrl.value, true);
   }
 
   function ensureMedia(url, title) {
@@ -376,36 +477,32 @@ export function useWatchRoom() {
   }
 
   function handleMediaError() {
-    if (!mediaUrl.value || hls) return;
+    if (!mediaUrl.value || hls || mediaLoadError.value) return;
+    if (isHlsMedia(mediaUrl.value)) {
+      const type = videoElement.value?.error?.code === MediaError.MEDIA_ERR_NETWORK ? "networkError" : "mediaError";
+      const reason = describeHlsError({ type }, mediaUrl.value, location.origin, navigator.onLine);
+      return failMedia(mediaUrl.value, reason.message, true);
+    }
     playbackBuffering = true;
     publishMemberStatus(true);
     showToast("视频加载失败，请检查格式、编码或跨域配置");
   }
 
   function handlePlaybackBuffering() {
-    if (!mediaUrl.value || playbackBuffering || bufferingTimer) return;
+    if (!mediaUrl.value || playbackBuffering) return;
     const video = videoElement.value;
     if (!video) return;
-    bufferingTimer = setTimeout(() => {
-      bufferingTimer = null;
-      const ahead = bufferedAhead(video);
-      const recovered = video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA
-        && (ahead >= 0.75 || video.paused);
-      if (recovered) return;
-      playbackBuffering = true;
-      publishMemberStatus(true);
-      if (isHost.value && !video.paused) beginPlaybackBarrier(video.currentTime, "播放卡顿");
-    }, BUFFERING_GRACE_MS);
+    playbackBuffering = true;
+    if (!video.paused) pauseForSafety("正在缓冲，暂停等待全员");
+    publishMemberStatus(true);
   }
 
   function handlePlaybackReady() {
     const video = videoElement.value;
     if (!video) return;
-    clearTimeout(bufferingTimer);
-    bufferingTimer = null;
     const ahead = bufferedAhead(video);
     const nearEnd = Number.isFinite(video.duration) && video.duration - video.currentTime < MIN_BUFFER_AHEAD_SECONDS;
-    if (video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA && ahead < MIN_BUFFER_AHEAD_SECONDS && !nearEnd) return;
+    if (video.seeking || video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA || (ahead < MIN_BUFFER_AHEAD_SECONDS && !nearEnd)) return;
     const wasBuffering = playbackBuffering;
     playbackBuffering = false;
     publishMemberStatus(wasBuffering);
@@ -433,17 +530,21 @@ export function useWatchRoom() {
   }
 
   async function executeCommand(command) {
+    const generation = playbackGeneration;
+    if (command.paused) videoElement.value?.pause();
     ensureMedia(command.mediaUrl, command.mediaTitle);
     await nextTick();
     if (!command.mediaUrl || !videoElement.value) return;
-
-    applyingRemote = true;
-    await waitForMetadata();
+    ensureMedia(command.mediaUrl, command.mediaTitle);
     const video = videoElement.value;
+    await waitForMetadata();
+    if (generation !== playbackGeneration || videoElement.value !== video || mediaUrl.value !== command.mediaUrl || command.sequence !== sequence) return;
+    applyingRemote = true;
     smoothedDrift = null;
     video.playbackRate = 1;
     const elapsed = Math.max(0, (estimatedServerTime() - command.executeAt) / 1000);
-    const targetPosition = Math.max(0, command.position + (command.paused ? 0 : elapsed));
+    const requestedPosition = Math.max(0, command.position + (command.paused ? 0 : elapsed));
+    const targetPosition = Number.isFinite(video.duration) ? Math.min(video.duration, requestedPosition) : requestedPosition;
     const seekTolerance = Math.max(0.08, Number(command.seekTolerance) || 0.08);
     if (Number.isFinite(targetPosition) && Math.abs(video.currentTime - targetPosition) > seekTolerance) {
       video.currentTime = targetPosition;
@@ -451,9 +552,16 @@ export function useWatchRoom() {
 
     try {
       if (command.paused) video.pause();
-      else await video.play();
-    } catch {
-      showToast("浏览器阻止了自动播放，请点击画面继续");
+      else {
+        if (!syncFresh() || syncBlocked.value || autoplayBlocked.value || document.visibilityState !== "visible") { pauseForSafety("等待同步确认"); return; }
+        await video.play();
+        if (generation !== playbackGeneration || command.sequence !== sequence || !syncFresh()) video.pause();
+      }
+    } catch (error) {
+      if (generation !== playbackGeneration || command.sequence !== sequence) return;
+      if (error.name === "NotAllowedError") autoplayBlocked.value = true;
+      else playbackBuffering = true;
+      pauseForSafety(autoplayBlocked.value ? "浏览器需要点击画面后才能播放" : "等待视频恢复缓冲");
     } finally {
       applyingRemote = false;
       updatePlayerState();
@@ -464,6 +572,11 @@ export function useWatchRoom() {
   function applyCommand(command, source = "ws") {
     if (!command || command.sequence <= sequence || pendingCommands.has(command.id)) return;
     sequence = command.sequence;
+    if (Number.isInteger(command.playlistIndex)) playlistIndex.value = command.playlistIndex;
+    if (command.mediaPoster !== undefined) mediaPoster.value = command.mediaPoster;
+    else if (playlist.value[playlistIndex.value]?.poster) mediaPoster.value = playlist.value[playlistIndex.value].poster;
+    if (typeof command.autoAdvance === "boolean") autoAdvance.value = command.autoAdvance;
+    if (command.lineLabel) lineLabel.value = command.lineLabel;
     pendingCommands.add(command.id);
     if (pendingCommands.size > 50) pendingCommands.delete(pendingCommands.values().next().value);
 
@@ -478,7 +591,7 @@ export function useWatchRoom() {
     if (source === "rtc") showToast("已通过低延迟通道同步");
   }
 
-  function createCommand({ paused, position, url = mediaUrl.value, title = mediaTitle.value }, delayMs = COMMAND_DELAY_MS) {
+  function createCommand({ paused, position, url = mediaUrl.value, title = mediaTitle.value, index = playlistIndex.value }, delayMs = COMMAND_DELAY_MS) {
     return {
       id: crypto.randomUUID(),
       sequence: sequence + 1,
@@ -487,6 +600,8 @@ export function useWatchRoom() {
       executeAt: estimatedServerTime() + delayMs,
       mediaUrl: url,
       mediaTitle: title,
+      playlistIndex: playlist.value[index]?.url === url ? index : -1,
+      autoAdvance: autoAdvance.value,
     };
   }
 
@@ -499,8 +614,6 @@ export function useWatchRoom() {
   }
 
   function publishCommand(command) {
-    applyCommand(command, "local");
-    broadcastData({ type: "sync-command", command }, "reliable");
     send({ type: "sync-command", command });
   }
 
@@ -509,11 +622,16 @@ export function useWatchRoom() {
     return playback?.mediaUrl === barrier.mediaUrl
       && playback.ready
       && !playback.buffering
-      && Math.abs(playback.position - barrier.position) < 1.25;
+      && playback.paused
+      && playback.sequence === sequence
+      && estimatedServerTime() - playback.sampledAt <= MAX_SYNC_DELAY_MS
+      && playback.syncRttMs <= MAX_SYNC_DELAY_MS
+      && Math.abs(playback.position - barrier.position) < ALIGN_TOLERANCE_SECONDS;
   }
 
   function evaluatePlaybackBarrier() {
     if (!isHost.value || !pendingPlaybackBarrier) return;
+    if (sequence < pendingPlaybackBarrier.sequence) return;
     const memberValues = [...members.values()];
     if (!memberValues.length || !memberValues.every((member) => memberReadyForBarrier(member, pendingPlaybackBarrier))) return;
 
@@ -521,7 +639,7 @@ export function useWatchRoom() {
     pendingPlaybackBarrier = null;
     waitingForPeers.value = false;
     const maxLatency = Math.max(0, ...memberValues.map((member) => member.network?.latencyMs || 0));
-    const delay = Math.max(COMMAND_DELAY_MS, Math.min(1500, maxLatency * 2 + 200));
+    const delay = Math.max(COMMAND_DELAY_MS, Math.min(500, maxLatency * 2 + 200));
     publishCommand(createCommand({
       paused: false,
       position: barrier.position,
@@ -535,6 +653,7 @@ export function useWatchRoom() {
     if (!isHost.value || !mediaUrl.value || pendingPlaybackBarrier) return;
     pendingPlaybackBarrier = {
       id: crypto.randomUUID(),
+      sequence: sequence + 1,
       position: Math.max(0, position),
       mediaUrl: mediaUrl.value,
       mediaTitle: mediaTitle.value,
@@ -556,11 +675,13 @@ export function useWatchRoom() {
     currentTime.value = video.currentTime || 0;
     duration.value = Number.isFinite(video.duration) ? video.duration : 0;
     playerPaused.value = video.paused;
+    videoHeight.value = video.videoHeight || 0;
   }
 
   function togglePlay() {
     const video = videoElement.value;
     if (!canControl.value || !video) return;
+    syncPauseReason.value = "";
     const position = video.ended ? 0 : video.currentTime;
     if (!video.paused) {
       cancelPlaybackBarrier();
@@ -574,14 +695,41 @@ export function useWatchRoom() {
     beginPlaybackBarrier(position);
   }
 
+  function syncFresh() {
+    return navigator.onLine && socket?.readyState === WebSocket.OPEN && authorityState && estimatedServerTime() < authorityState.validUntil && performance.now() - lastAuthorityAt < SYNC_LEASE_MS;
+  }
+
+  function pauseForSafety(reason) {
+    if (!joined.value || !mediaUrl.value) return;
+    const video = videoElement.value;
+    video?.pause();
+    if (syncBlocked.value) return;
+    syncBlocked.value = true;
+    waitingForPeers.value = true;
+    playbackGeneration += 1;
+    clearScheduledCommands();
+    send({ type: "sync-hold" });
+    publishMemberStatus(true);
+    showToast(reason);
+  }
+
+  function allowPlayback() {
+    autoplayBlocked.value = false;
+    publishMemberStatus(true);
+  }
+
+  function visibilityChanged() {
+    if ((!navigator.onLine || document.visibilityState !== "visible") && joined.value && mediaUrl.value && (!videoElement.value?.paused || authorityState?.paused === false)) pauseForSafety("页面进入后台或断网，已暂停同步播放");
+    else publishMemberStatus(true);
+  }
+
   function seek(event) {
     if (!isHost.value || !videoElement.value) return;
     const video = videoElement.value;
     const position = Number(event.target.value);
     const paused = video.paused;
     seekPreview.value = null;
-    video.currentTime = position;
-    currentTime.value = position;
+    video.pause();
     if (paused) publishCommand(createCommand({ paused: true, position }));
     else beginPlaybackBarrier(position, "正在同步新进度");
   }
@@ -622,25 +770,88 @@ export function useWatchRoom() {
     }
   }
 
-  function loadMedia(url, title) {
+  async function loadMedia(url, title) {
+    if (!isHost.value) return;
+    const room = roomId.value;
+    try { await checkMediaAvailability(url); } catch (cause) { showToast(cause.message); return; }
+    if (!isHost.value || roomId.value !== room || disposed) return;
     cancelPlaybackBarrier();
-    publishCommand(createCommand({ paused: true, position: 0, url, title }));
+    playlist.value = [];
+    playlistTitle.value = "";
+    playlistIndex.value = -1;
+    mediaPoster.value = "";
+    publishCommand(createCommand({ paused: true, position: 0, url, title, index: -1 }));
+  }
+
+  async function selectPlaylistItem(index, autoplay = false) {
+    const item = playlist.value[index];
+    if (!isHost.value || !item) return;
+    const room = roomId.value;
+    try { await checkMediaAvailability(item.url); } catch (cause) { showToast(cause.message); return; }
+    if (!isHost.value || roomId.value !== room || playlist.value[index] !== item || disposed) return;
+    cancelPlaybackBarrier();
+    playlistIndex.value = index;
+    if (autoplay) {
+      pendingPlaybackBarrier = { id: crypto.randomUUID(), sequence: sequence + 1, position: 0, mediaUrl: item.url, mediaTitle: item.title };
+      waitingForPeers.value = true;
+    }
+    publishCommand(createCommand({ paused: true, position: 0, url: item.url, title: item.title, index }));
+    showToast(`已切换到第 ${index + 1} 集`);
+  }
+
+  function handlePlaybackEnded() {
+    if (!isHost.value || lastEndedSequence === sequence) return;
+    lastEndedSequence = sequence;
+    if (isHost.value && autoAdvance.value && playlistIndex.value + 1 < playlist.value.length) {
+      selectPlaylistItem(playlistIndex.value + 1, true);
+    } else {
+      cancelPlaybackBarrier();
+      const duration = videoElement.value?.duration;
+      publishCommand(createCommand({ paused: true, position: Number.isFinite(duration) ? duration : currentTime.value }));
+    }
+  }
+
+  function changeAutoAdvance() {
+    if (!isHost.value) return;
+    publishCommand(createCommand({ paused: playerPaused.value, position: currentTime.value }));
+  }
+
+  function requestLines() {
+    if (!connected.value) return showToast("连接已断开，请重新进入房间");
+    linesLoading.value = true;
+    availableLines.value = [];
+    lineRequestVersion += 1;
+    send({ type: "request-lines" });
+  }
+
+  async function switchLine(line) {
+    if (!isHost.value) return;
+    const room = roomId.value;
+    try { await checkMediaAvailability(line.url); } catch (cause) { showToast(cause.message); return; }
+    if (!isHost.value || roomId.value !== room || disposed) return;
+    cancelPlaybackBarrier();
+    send({ type: "switch-line", id: line.id, position: videoElement.value?.currentTime || currentTime.value });
+    showToast("正在切换线路，将保留观看进度");
   }
 
   function reconcilePlayback(heartbeat) {
     const video = videoElement.value;
-    if (isHost.value || !mediaUrl.value || applyingRemote || !video) return;
+    if (!mediaUrl.value || applyingRemote || !video || heartbeat.sequence !== sequence || heartbeat.mediaUrl !== mediaUrl.value) return;
     if (heartbeat.serverTime <= lastHeartbeatServerTime) return;
     lastHeartbeatServerTime = heartbeat.serverTime;
 
+    if (estimatedServerTime() < heartbeat.executeAt) return;
+    if (!heartbeat.paused && (syncBlocked.value || !syncFresh() || playbackBuffering || autoplayBlocked.value)) { video.pause(); return; }
     if (heartbeat.paused !== video.paused) {
       smoothedDrift = null;
-      executeCommand({ ...heartbeat, executeAt: heartbeat.serverTime, position: heartbeat.position });
+      executeCommand(heartbeat);
       return;
     }
     if (heartbeat.paused || playbackBuffering) {
       smoothedDrift = null;
       video.playbackRate = 1;
+      if (heartbeat.paused && video.readyState >= 1 && !video.seeking && Math.abs(video.currentTime - heartbeat.position) > 0.08) video.currentTime = heartbeat.position;
+      if (heartbeat.paused && Number.isFinite(video.duration) && heartbeat.position >= video.duration - 0.01 && autoAdvance.value && playlistIndex.value + 1 < playlist.value.length) handlePlaybackEnded();
       return;
     }
 
@@ -648,12 +859,12 @@ export function useWatchRoom() {
     const expected = heartbeat.position + (heartbeat.paused ? 0 : elapsed);
     const drift = expected - video.currentTime;
     smoothedDrift = smoothedDrift == null ? drift : smoothedDrift * 0.65 + drift * 0.35;
-    const absoluteDrift = Math.abs(smoothedDrift);
+    const absoluteDrift = Math.abs(drift);
 
-    if (absoluteDrift > HARD_SYNC_THRESHOLD_SECONDS && Date.now() - lastHardSyncAt > 2500) {
+    if (absoluteDrift > MAX_DRIFT_SECONDS) {
+      pauseForSafety("播放偏差较大，暂停对齐进度");
       video.currentTime = expected;
       video.playbackRate = 1;
-      lastHardSyncAt = Date.now();
       smoothedDrift = null;
       showToast(`已校准 ${Math.round(absoluteDrift * 1000)}ms`);
     } else if (absoluteDrift > 0.08 && !heartbeat.paused) {
@@ -687,8 +898,6 @@ export function useWatchRoom() {
       }
       return;
     }
-    if (payload.type === "sync-command" && peerId === hostId.value) applyCommand(payload.command, "rtc");
-    if (payload.type === "heartbeat" && peerId === hostId.value) reconcilePlayback(payload.heartbeat);
     if (payload.type === "typing") handleTyping(payload);
   }
 
@@ -1169,11 +1378,69 @@ export function useWatchRoom() {
     evaluatePlaybackBarrier();
   }
 
+  function resetRoom(reason) {
+    sourceGeneration += 1;
+    lineRequestVersion += 1;
+    mediaLoadError.value = "";
+    playbackGeneration += 1;
+    showToast(reason || "房间已由管理员关闭");
+    clearScheduledCommands();
+    cancelPlaybackBarrier();
+    pendingCommands.clear();
+    sequence = -1;
+    lastHeartbeatServerTime = 0;
+    lastEndedSequence = -1;
+    authorityState = null;
+    syncBlocked.value = false;
+    autoplayBlocked.value = false;
+    syncPauseReason.value = "";
+    smoothedDrift = null;
+    destroyHls();
+    loadedMediaUrl = "";
+    videoElement.value?.pause();
+    videoElement.value?.removeAttribute("src");
+    videoElement.value?.load();
+    leaveVoice();
+    for (const peerId of [...peers.keys()]) closePeer(peerId);
+    members.clear();
+    messages.value = [];
+    typingPeers.clear();
+    for (const timer of typingTimers.values()) clearTimeout(timer);
+    typingTimers.clear();
+    mediaUrl.value = "";
+    mediaTitle.value = "尚未添加视频";
+    mediaPoster.value = "";
+    playlist.value = [];
+    playlistTitle.value = "";
+    playlistIndex.value = -1;
+    currentTime.value = 0;
+    duration.value = 0;
+    seekPreview.value = null;
+    playerPaused.value = true;
+    applyingRemote = false;
+    clientId.value = null;
+    hostId.value = null;
+    roomId.value = null;
+    joined.value = false;
+    joinRoomId.value = "";
+    history.replaceState(null, "", location.pathname);
+    socket?.close();
+  }
+
   function handleSocketMessage(event) {
     const message = JSON.parse(event.data);
+    if (message.type === "account-logout") { accountSignedOut.value = true; resetRoom("账户已退出"); return; }
+    if (message.type === "join-error") {
+      joining.value = false;
+      resetRoom(message.error);
+      if (message.code === 401) requiresLogin.value = true;
+      return;
+    }
+    if (message.type === "room-closed") { resetRoom(message.error); return; }
     if (message.type === "clock-pong") {
       const receivedAt = Date.now();
       const rtt = receivedAt - message.clientSentAt;
+      clockRtt = rtt;
       if (rtt < bestClockRtt) {
         bestClockRtt = rtt;
         serverOffset = message.serverAt - (message.clientSentAt + rtt / 2);
@@ -1181,7 +1448,35 @@ export function useWatchRoom() {
       return;
     }
 
+    if (message.type === "sync-state") {
+      const state = message.state;
+      if (state.sequence < sequence) return;
+      authorityState = state;
+      lastAuthorityAt = performance.now();
+      hostId.value = message.hostId;
+      if (state.paused && syncFresh() && document.visibilityState === "visible") syncBlocked.value = false;
+      if (state.syncWaiting && isHost.value && !pendingPlaybackBarrier) {
+        pendingPlaybackBarrier = { sequence: state.sequence, position: state.position, mediaUrl: state.mediaUrl, mediaTitle: state.mediaTitle };
+      }
+      waitingForPeers.value = Boolean(state.syncWaiting || syncBlocked.value || pendingPlaybackBarrier);
+      if (!state.paused) syncPauseReason.value = "";
+      if (state.sequence > sequence) applyCommand({ id: `state-${state.sequence}`, ...state });
+      else reconcilePlayback(state);
+      return;
+    }
+
     if (message.type === "joined") {
+      playbackGeneration += 1;
+      authorityState = null;
+      bestClockRtt = Infinity;
+      clockRtt = Infinity;
+      lastHeartbeatServerTime = 0;
+      lastEndedSequence = -1;
+      syncPauseReason.value = "";
+      clearScheduledCommands();
+      pendingCommands.clear();
+      for (const peerId of [...peers.keys()]) closePeer(peerId);
+      joining.value = false;
       if (Array.isArray(message.iceServers) && message.iceServers.length) iceServers = message.iceServers;
       clientId.value = message.clientId;
       hostId.value = message.hostId;
@@ -1190,11 +1485,18 @@ export function useWatchRoom() {
       members.clear();
       message.members.forEach((member) => members.set(member.id, member));
       messages.value = [...message.messages];
+      playlist.value = message.playlist || [];
+      playlistTitle.value = message.playlistTitle || "";
+      mediaPoster.value = message.mediaPoster || "";
+      availableLines.value = [];
+      linesLoading.value = false;
+      lineLabel.value = message.state.lineLabel || "默认线路";
       joined.value = true;
       history.replaceState(null, "", `?room=${roomId.value}`);
       applyCommand({ id: `initial-${message.state.sequence}`, ...message.state, executeAt: message.state.serverTime });
       clockPing();
       publishMemberStatus(true);
+      if (voiceJoined.value) publishVoiceState(true, voiceMuted.value);
       return;
     }
 
@@ -1212,10 +1514,11 @@ export function useWatchRoom() {
       return;
     }
     if (message.type === "host-changed") {
+      playbackGeneration += 1;
       hostId.value = message.hostId;
       cancelPlaybackBarrier();
       if (message.state) {
-        sequence = Math.max(sequence, message.state.sequence);
+        sequence = message.state.sequence;
         clearScheduledCommands();
         executeCommand({
           id: `host-change-${message.state.sequence}`,
@@ -1228,7 +1531,32 @@ export function useWatchRoom() {
       return;
     }
     if (message.type === "signal") handleSignal(message);
-    if (message.type === "sync-command") applyCommand(message.command, "ws");
+    if (message.type === "available-lines" && message.roomId === roomId.value) {
+      const version = lineRequestVersion;
+      const url = mediaUrl.value;
+      lineLabel.value = message.lines.find(line => line.current)?.name || lineLabel.value;
+      Promise.all(message.lines.map(async line => {
+        try { await checkMediaAvailability(line.url); return line; } catch { return null; }
+      })).then(lines => {
+        if (version !== lineRequestVersion || url !== mediaUrl.value || message.roomId !== roomId.value || disposed) return;
+        availableLines.value = lines.filter(Boolean); linesLoading.value = false;
+      });
+    }
+    if (message.type === "line-error") { linesLoading.value = false; showToast(message.error); }
+    if (message.type === "playlist") {
+      playlist.value = message.items || [];
+      playlistTitle.value = message.title || "";
+      if (!playlist.value.length) playlistIndex.value = -1;
+    }
+    if (message.type === "sync-command") {
+      if (message.command.requireHostResume) { cancelPlaybackBarrier(); syncPauseReason.value = message.command.syncReason; }
+      if (message.command.resumePlay && isHost.value) {
+        cancelPlaybackBarrier();
+        pendingPlaybackBarrier = { id: crypto.randomUUID(), sequence: message.command.sequence, position: message.command.position, mediaUrl: message.command.mediaUrl, mediaTitle: message.command.mediaTitle };
+        waitingForPeers.value = true;
+      }
+      applyCommand(message.command, "ws");
+    }
     if (message.type === "room-state") {
       hostId.value = message.hostId;
       applyCommand({ id: `state-${message.state.sequence}`, ...message.state }, "ws");
@@ -1239,20 +1567,43 @@ export function useWatchRoom() {
     if (message.type === "voice-state") updateMemberVoice(message.peerId, message.enabled, message.muted);
   }
 
-  function joinRoom() {
+  async function joinRoom(reconnect = false) {
+    reconnect = reconnect === true;
+    if (joining.value || (joined.value && !reconnect)) return;
     const name = joinName.value.trim();
-    const requestedRoomId = joinRoomId.value.trim().toUpperCase() || randomRoomId();
+    const requestedRoomId = reconnect ? roomId.value : joinRoomId.value.trim().toUpperCase() || randomRoomId();
     if (!name) return;
+    joining.value = true;
+    if (!reconnect && selectedResource.value?.url) {
+      try { await checkMediaAvailability(selectedResource.value.url); }
+      catch (cause) { joining.value = false; showToast(cause.message); return; }
+      if (disposed) return;
+    }
     localStorage.setItem("watch-name", name);
     connectionLabel.value = "连接中";
-    socket = new WebSocket(resolveWebSocketUrl());
+    clearTimeout(reconnectTimer);
+    const connection = new WebSocket(resolveWebSocketUrl());
+    socket = connection;
     socket.addEventListener("open", () => {
       updateConnectionStatus();
-      send({ type: "join", roomId: requestedRoomId, name });
+      const resource = selectedResource.value;
+      send({ type: "join", syncProtocol: SYNC_PROTOCOL, roomId: requestedRoomId, name, reconnect,
+        resourceId: resource?.id || "", media: resource?.id ? null : resource,
+        selectionId: resource?.selectionId || "", playlistIndex: resource?.playlistIndex || 0,
+        collectionResourceId: resource?.collectionResourceId || "",
+        libraryGroupId: resource?.libraryGroupId || "",
+        resumePosition: resource?.resumePosition || 0,
+      });
       for (let index = 0; index < 5; index += 1) setTimeout(clockPing, index * 350);
     });
     socket.addEventListener("message", handleSocketMessage);
-    socket.addEventListener("close", updateConnectionStatus);
+    socket.addEventListener("close", () => {
+      if (socket !== connection) return;
+      pauseForSafety("连接断开，已保护暂停");
+      joining.value = false;
+      updateConnectionStatus();
+      if (joined.value && !disposed) reconnectTimer = setTimeout(() => joinRoom(true), 1500);
+    });
   }
 
   function sendChat() {
@@ -1261,6 +1612,11 @@ export function useWatchRoom() {
     send({ type: "chat", text });
     chatText.value = "";
     sendTyping(false);
+  }
+
+  function selectResource(resource) {
+    selectedResource.value = resource;
+    joinRoomId.value = "";
   }
 
   function sendTyping(active) {
@@ -1289,41 +1645,56 @@ export function useWatchRoom() {
 
   document.addEventListener("pointerdown", resumeRemoteAudio, { capture: true });
 
+  document.addEventListener("visibilitychange", visibilityChanged);
+  window.addEventListener("offline", visibilityChanged);
   const heartbeatInterval = setInterval(() => {
-    const video = videoElement.value;
-    if (!isHost.value || !mediaUrl.value || !video) return;
-    broadcastData({
-      type: "heartbeat",
-      heartbeat: {
-        paused: video.paused,
-        position: video.currentTime,
-        serverTime: estimatedServerTime(),
-        mediaUrl: mediaUrl.value,
-        mediaTitle: mediaTitle.value,
-      },
-    }, "state");
-  }, 1000);
-  const memberStatusInterval = setInterval(() => publishMemberStatus(), 1000);
+    if (!joined.value || !mediaUrl.value) return;
+    if (!syncFresh() && (!videoElement.value?.paused || authorityState?.paused === false)) pauseForSafety("同步信号超时，已保护暂停");
+    publishMemberStatus(true);
+  }, SYNC_TICK_MS);
   const networkStatsInterval = setInterval(updateNetworkStats, 2000);
-  const clockInterval = setInterval(clockPing, 15000);
+  const clockInterval = setInterval(clockPing, 500);
 
   onBeforeUnmount(() => {
+    disposed = true;
+    clearTimeout(reconnectTimer);
     clearInterval(heartbeatInterval);
-    clearInterval(memberStatusInterval);
     clearInterval(networkStatsInterval);
     clearInterval(clockInterval);
     clearScheduledCommands();
-    clearTimeout(bufferingTimer);
     clearTimeout(typingTimer);
     clearTimeout(toastTimer);
     destroyHls();
     document.removeEventListener("pointerdown", resumeRemoteAudio, { capture: true });
+    document.removeEventListener("visibilitychange", visibilityChanged);
+    window.removeEventListener("offline", visibilityChanged);
     stopVoiceCapture();
     for (const peerId of [...peers.keys()]) closePeer(peerId);
     socket?.close();
   });
 
   return {
+    qualityLevels,
+    mediaLoadError,
+    retryMedia,
+    selectedQuality,
+    currentQualityLabel,
+    qualitySummary,
+    changeQuality,
+    autoplayBlocked,
+    allowPlayback,
+    playlist,
+    playlistTitle,
+    playlistIndex,
+    autoAdvance,
+    selectPlaylistItem,
+    handlePlaybackEnded,
+    changeAutoAdvance,
+    availableLines,
+    linesLoading,
+    lineLabel,
+    requestLines,
+    switchLine,
     activeTab,
     bufferBarValue,
     canControl,
@@ -1348,8 +1719,14 @@ export function useWatchRoom() {
     joinName,
     joinRoom,
     joinRoomId,
+    selectedResource,
+    joining,
+    requiresLogin,
+    accountSignedOut,
+    selectResource,
     loadMedia,
     mediaTitle,
+    mediaPoster,
     mediaFormat,
     mediaUrl,
     memberList,

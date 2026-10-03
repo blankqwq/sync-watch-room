@@ -1,3 +1,5 @@
+<img src="./public/couple-tv-icon.png" alt="sync-watch-room project icon: a couple watching television" width="96" />
+
 # sync-watch-room
 
 **English** | [简体中文](./README.zh-CN.md)
@@ -25,6 +27,12 @@ A lightweight synchronized watch room built with Vue 3, Node.js, WebSocket, and 
 - MP4 and WebM playback through the browser, plus HLS/M3U8 playback through `hls.js`
 - Responsive desktop and mobile interfaces with fullscreen playback controls
 
+## Project Icon
+
+The project icon shows a couple leaning together while watching television. Its simple blue and coral shapes represent shared viewing and companionship. The icon was generated with imagegen and is stored as a 256 × 256 PNG with a transparent background at [`public/couple-tv-icon.png`](./public/couple-tv-icon.png).
+
+This image is the default project identity, used in the application header, browser favicon, and documentation. **Admin → Application settings** lets each deployment customize the application name and icon by uploading a PNG, JPEG, or WebP up to 512 KB, or providing an image URL. Settings persist in PostgreSQL and update the header, browser title, and favicon. **Restore default icon** selects this project icon.
+
 ## Architecture
 
 ```text
@@ -45,7 +53,7 @@ A lightweight synchronized watch room built with Vue 3, Node.js, WebSocket, and 
 ```
 
 - **WebSocket** owns recoverable room state, chat, heartbeat, host election, and WebRTC signaling.
-- **WebRTC DataChannel** carries low-latency playback control events when peers are connected.
+- **WebRTC DataChannel** carries typing events and peer latency measurements. Playback commands use the authoritative WebSocket channel.
 - **WebRTC audio tracks** provide peer-to-peer voice communication.
 - **OSS/CDN** stores and distributes video files. Video bytes are not sent through the room server.
 
@@ -61,6 +69,9 @@ A lightweight synchronized watch room built with Vue 3, Node.js, WebSocket, and 
 git clone https://github.com/<your-account>/sync-watch-room.git
 cd sync-watch-room
 npm install
+npm run setup:env -- --domain localhost --turn-domain localhost
+# Set DATABASE_URL in .env and start the local PostgreSQL service:
+docker compose up -d --wait postgres
 npm run dev
 ```
 
@@ -70,7 +81,8 @@ During development:
 
 - Vite runs the frontend on port `4173`.
 - The Node.js WebSocket server runs on port `4174`.
-- Vite proxies `/ws` to the WebSocket server.
+- Vite proxies `/ws` and `/api` to the backend.
+- The development backend accepts `localhost:4173` and `127.0.0.1:4173`, overriding production origins from `.env` for local development.
 
 ## Scripts
 
@@ -82,10 +94,28 @@ During development:
 | `npm run build` | Build the Vue application into `dist/` |
 | `npm run preview` | Preview the production frontend build |
 | `npm start` | Serve `dist/` and WebSocket connections from Node.js |
-| `npm test` | Run the Node.js server tests |
+| `npm test` | Run server and HLS availability tests |
 | `npm run check` | Run server tests and the production frontend build |
 
 ## Media Sources
+
+The home page groups episodes into film/series cards with posters and grid/list views. Visitors can browse without login; accounts are required to create/join rooms and save personal progress. The **Admin** panel uses `ADMIN_TOKEN` for rooms, resources, provider presets, and OSS files.
+
+A recommendation banner above search shows up to five library resources, falling back to the latest public provider results when the library is empty. It rotates every six seconds with pause, previous/next, and episode selection controls. Rotation pauses on hover, keyboard focus, or a hidden page and respects reduced motion. The layout adapts to mobile screens. Banners, resource cards, and list rows have fixed heights; long titles, descriptions, and metadata truncate with ellipses and expose their full text through native hover tooltips.
+
+Native backend startup reads the project-root `.env`; inherited environment variables take precedence. Set `DATABASE_URL` for PostgreSQL. On first startup, legacy JSON files from `DATA_DIR` are imported as seeds; existing database records take precedence. New writes go to PostgreSQL.
+
+To enable Alibaba OSS browser uploads, set `OSS_REGION`, `OSS_BUCKET`, `OSS_ACCESS_KEY_ID`, `OSS_ACCESS_KEY_SECRET`, and the public HTTPS `OSS_PUBLIC_URL` in `.env`. The server signs a short-lived PUT URL; the browser uploads MP4/WebM directly and the server verifies the object before publishing it. Configure bucket CORS for PUT from your site and make the published video readable through `OSS_PUBLIC_URL`. The UI supports files up to 1 GiB.
+
+In **Admin → Resources**, use **Choose from OSS** beside the video URL when adding or editing a resource. Filter objects by prefix (clear it to browse all), load more pages, and select an MP4, WebM, or M3U8 file. Its public URL is filled automatically; an empty title defaults to the filename. Save the resource to publish it.
+
+HLS selections are checked in the current browser for readable manifests, the first fragment, and associated initialization files/keys, including CORS. Episode details check the first episode of each line. Confirmed 404/410 or invalid manifests are hidden for ten minutes in the current page session. Probe timeouts, 403, CORS and network errors defer to the actual player. All members can use **Retry loading** to immediately clear a local failure and reload; working alternatives remain available, and library selections try alternate lines. Confirmed player failures also temporarily hide the URL and can be retried immediately. Cross-origin failures show a dedicated loading hint; explicit CORS errors, HTTP errors, timeouts, and offline state have distinct messages. Fatal HLS network failures stop loading; media decoding gets at most one recovery attempt. Viewers can switch lines. Passing this check does not establish that every fragment or codec will play.
+
+You can also **Upload file** directly from this form. MP4/WebM uploads show progress and can be cancelled. After the server verifies the uploaded file, its URL fills the current form while existing title, poster, and description stay intact. **Save resource** publishes or updates it. Closing the form does not delete an uploaded OSS object; you can select it later.
+
+MacCMS V10 sources can be added, edited, published, disabled, or deleted in the admin panel. Settings persist in PostgreSQL. Clients search a unified catalog without provider identities; equivalent titles are merged using movie identifiers or normalized title/year metadata. Signed-in viewers choose episodes and playback lines. Admins can also import episodes into the curated catalog and edit their title, poster, and description.
+
+`MACCMS_SOURCES=Label|https://example.com/api.php/provide/vod/` supplies initial sources (comma-separated for multiple entries). Once database settings exist, saved admin settings take precedence. XML provider paths ending in `/at/xml/` are normalized to JSON. [Feifan's provider documentation](https://ffzy.tv/help/) publishes a compatible M3U8 endpoint at `https://api.ffzyapi.com/api.php/provide/vod/from/ffm3u8/`. Playback URLs must allow browser cross-origin access.
 
 The room host can load:
 
@@ -106,10 +136,17 @@ Magnet links and ordinary BitTorrent peers are not played directly. A production
 
 Host actions carry an `executeAt` timestamp and are sent before their execution time. Clients execute against a calibrated server clock instead of reacting immediately when a message arrives.
 
-- Drift below 80ms: keep the current playback rate
-- Drift from 80ms to 300ms: briefly use `0.98x` or `1.02x` playback
-- Drift above 300ms: seek to the authoritative room position
-- Insufficient peer buffer: pause the shared start and schedule a new start after members recover
+- The server distributes authoritative playback state every 50ms; playback control does not depend on a P2P connection.
+- Small drift is corrected with brief playback-rate changes. Drift above 150ms pauses the room to align positions; starts require every member to acknowledge the same sequence and align within 80ms.
+- Buffer loss, stale progress reports, or signaling latency above 150ms pause the room. A browser stops locally when its 300ms synchronization lease expires, rather than continuing alone.
+- Every member needs at least 1.5 seconds of playable buffer before a shared start. Returning from a disconnected or hidden page requires synchronization again. [Background browser timers can be throttled](https://developer.chrome.com/blog/timer-throttling-in-chrome-88/), so hidden pages pause shared playback.
+- A member connection closing pauses the room and requires host confirmation to continue; remaining clients do not automatically resume alone.
+
+The target is playback drift below one second; poor connectivity is handled by pausing and waiting. A fully disconnected or suspended device cannot receive new frames or seek commands, so continuous playback is not promised in that state.
+
+After this synchronization update, refresh every room client before rejoining. The server rejects clients using the previous synchronization protocol.
+
+The controls below the player offer the actual quality variants provided by an HLS source, including an automatic mode. Each viewer chooses independently without changing the shared film or timeline. Buffer loss during a switch still pauses the room under the synchronization policy. Single-variant sources and direct MP4/WebM files display their original quality; browsers limited to native HLS use automatic quality.
 
 ## Voice Processing
 
@@ -124,7 +161,7 @@ Direct peer connections do not send voice through the room server. When direct c
 
 ## Production Deployment
 
-The repository includes separate production services for the Vue frontend, Node.js signaling backend, and coturn relay, plus an Nginx WebSocket reverse proxy, health checks, graceful shutdown, and a Docker Compose definition.
+The repository includes separate production services for the Vue frontend, Node.js signaling backend, PostgreSQL database, and coturn relay, plus an Nginx WebSocket reverse proxy, health checks, graceful shutdown, and a Docker Compose definition.
 
 ```bash
 npm run setup:env
@@ -134,14 +171,15 @@ docker compose up --build -d
 
 Open `http://localhost:8088`. Put an HTTPS load balancer or reverse proxy in front of this endpoint in production. See the [deployment guide](./docs/deployment.md) for environment variables, standalone deployment, health endpoints, upgrades, and scaling limits.
 
-The server keeps rooms and chat history in process memory. Run one backend replica unless room state is moved to shared storage and WebSocket routing is made room-aware.
+PostgreSQL stores resources, sources, users, sessions, watch history, and room checkpoints. Active members and WebRTC connections remain owned by one backend process; recent rooms can recover after reconnect/restart. Keep one backend replica until cross-instance event routing is implemented.
+
+Viewing history supports deleting individual entries and clearing unavailable entries. Removed library resources, unavailable series, and disabled providers are marked unavailable. Network entries with an enabled public provider remain available even when they have not been imported into the library. Series are grouped automatically in the library. The standalone collection feature has been removed; admins can import an entire series directly into the library.
 
 ## Production Backlog
 
 For an internet-facing service, the next application-level controls should include:
 
-- Persistent room and message storage
-- Authentication and room authorization
+- Private-room authorization and configurable retention
 - TURN capacity limits and usage monitoring
 - Per-user request throttling and stronger authorization-aware validation
 - Shared room state and room-aware multi-instance routing
@@ -149,7 +187,7 @@ For an internet-facing service, the next application-level controls should inclu
 
 ## Project Status
 
-This repository is an early-stage reference implementation. Synchronization, chat, voice, buffering, heartbeat, host failover, health checks, graceful shutdown, and container deployment are implemented. Persistence, authentication, and horizontal scaling remain future work.
+This is a runnable single-instance version with user accounts, private resume history, merged provider search, ordered playlists, and PostgreSQL persistence. Active signaling and WebRTC routing require a single backend replica.
 
 ## Contributing
 
